@@ -1,146 +1,112 @@
 version: '3.8'
 
 services:
-  # PostgreSQL Database
-  database:
-    image: postgres:15-alpine
-    container_name: productify-db
+  # MongoDB Database
+  mongodb:
+    image: mongo:7.0
+    container_name: aiblogpost-mongodb
     restart: unless-stopped
     environment:
-      POSTGRES_DB: productify
-      POSTGRES_USER: productify
-      POSTGRES_PASSWORD: productify_password
-      PGDATA: /var/lib/postgresql/data/pgdata
-    volumes:
-      - postgres_data:/var/lib/postgresql/data
-      - ./backend/src/db/init.sql:/docker-entrypoint-initdb.d/init.sql
+      MONGO_INITDB_ROOT_USERNAME: admin
+      MONGO_INITDB_ROOT_PASSWORD: password123
+      MONGO_INITDB_DATABASE: aiblogpost
     ports:
-      - "5432:5432"
-    networks:
-      - productify-network
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U productify -d productify"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-
-  # Redis (for caching and sessions)
-  redis:
-    image: redis:7-alpine
-    container_name: productify-redis
-    restart: unless-stopped
-    command: redis-server --appendonly yes --requirepass redis_password
+      - "27017:27017"
     volumes:
-      - redis_data:/data
-    ports:
-      - "6379:6379"
+      - mongodb_data:/data/db
+      - ./deploy/docker/mongo-init.js:/docker-entrypoint-initdb.d/mongo-init.js:ro
     networks:
-      - productify-network
-    healthcheck:
-      test: ["CMD", "redis-cli", "--raw", "incr", "ping"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
+      - aiblogpost-network
 
   # Backend API
   backend:
     build:
       context: .
-      dockerfile: infra/Dockerfile.backend
-    container_name: productify-backend
+      dockerfile: deploy/docker/backend.Dockerfile
+      target: deps
+    container_name: aiblogpost-backend
     restart: unless-stopped
     environment:
       NODE_ENV: development
       PORT: 5000
-      DATABASE_URL: postgresql://productify:productify_password@database:5432/productify?schema=public
-      JWT_SECRET: your-super-secure-jwt-secret-at-least-32-characters-long-dev
-      JWT_REFRESH_SECRET: your-super-secure-refresh-secret-at-least-32-characters-long-dev
-      CORS_ALLOWED_ORIGINS: http://localhost:3000,http://localhost:5173
-      LOG_LEVEL: debug
+      MONGODB_URI: mongodb://admin:password123@mongodb:27017/aiblogpost?authSource=admin
+      JWT_SECRET: your-super-secure-jwt-secret-key-here
+      JWT_REFRESH_SECRET: your-super-secure-jwt-refresh-secret-key-here
+      OPENAI_API_KEY: your-openai-api-key-here
+      GOOGLE_CLIENT_ID: your-google-client-id-here
+      GOOGLE_CLIENT_SECRET: your-google-client-secret-here
+      GOOGLE_REDIRECT_URI: http://localhost:5000/api/blogspot/callback
+      CORS_ALLOWED_ORIGINS: http://localhost:3000
+      FRONTEND_URL: http://localhost:3000
+    ports:
+      - "5000:5000"
     volumes:
       - ./backend:/app
       - /app/node_modules
-      - ./logs:/app/logs
-    ports:
-      - "5000:5000"
-    networks:
-      - productify-network
     depends_on:
-      database:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-    healthcheck:
-      test: ["CMD", "node", "-e", "require('http').get('http://localhost:5000/health', (res) => { process.exit(res.statusCode === 200 ? 0 : 1) }).on('error', () => process.exit(1))"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 40s
+      - mongodb
+    networks:
+      - aiblogpost-network
+    command: npm run dev
 
-  # Frontend
+  # Frontend (Next.js)
   frontend:
     build:
-      context: .
-      dockerfile: infra/Dockerfile.frontend
-    container_name: productify-frontend
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: aiblogpost-frontend
     restart: unless-stopped
     environment:
-      VITE_API_URL: http://localhost:5000/api
+      NEXT_PUBLIC_API_URL: http://localhost:5000
+      NEXT_PUBLIC_APP_NAME: AI Blogpost Generator
+    ports:
+      - "3000:3000"
     volumes:
       - ./frontend:/app
       - /app/node_modules
-    ports:
-      - "3000:80"
-    networks:
-      - productify-network
+      - /app/.next
     depends_on:
       - backend
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost/health"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
+    networks:
+      - aiblogpost-network
+    command: npm run dev
 
-  # Development database management tool
-  adminer:
-    image: adminer:latest
-    container_name: productify-adminer
+  # MongoDB Express (Database Management UI)
+  mongo-express:
+    image: mongo-express:latest
+    container_name: aiblogpost-mongo-express
     restart: unless-stopped
     environment:
-      ADMINER_DEFAULT_SERVER: database
-      ADMINER_DESIGN: pepa-linha
+      ME_CONFIG_MONGODB_ADMINUSERNAME: admin
+      ME_CONFIG_MONGODB_ADMINPASSWORD: password123
+      ME_CONFIG_MONGODB_URL: mongodb://admin:password123@mongodb:27017/
+      ME_CONFIG_BASICAUTH_USERNAME: admin
+      ME_CONFIG_BASICAUTH_PASSWORD: password123
     ports:
-      - "8080:8080"
-    networks:
-      - productify-network
+      - "8081:8081"
     depends_on:
-      - database
+      - mongodb
+    networks:
+      - aiblogpost-network
 
-  # Nginx Load Balancer (for production-like setup)
-  nginx:
-    image: nginx:alpine
-    container_name: productify-nginx
+  # Redis (for caching and sessions)
+  redis:
+    image: redis:7-alpine
+    container_name: aiblogpost-redis
     restart: unless-stopped
-    volumes:
-      - ./infra/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
     ports:
-      - "80:80"
-      - "443:443"
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
     networks:
-      - productify-network
-    depends_on:
-      - frontend
-      - backend
-    profiles:
-      - production
+      - aiblogpost-network
 
 volumes:
-  postgres_data:
+  mongodb_data:
     driver: local
   redis_data:
     driver: local
 
 networks:
-  productify-network:
+  aiblogpost-network:
     driver: bridge
-    name: productify-network
